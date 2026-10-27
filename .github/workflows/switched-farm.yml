@@ -259,10 +259,18 @@ jobs:
           # 删除 workflow run 需要 permissions.actions: write
           set +e
           KEEP=5
-          API="repos/${{ github.repository }}/actions/runs"
-          # 只挑本工作流的运行，且绝不删当前这一次
-          ALL=$(gh api "${API}?per_page=100" \
-                --jq ".workflow_runs[] | select(.name==\"${{ github.workflow }}\" and .id != ${{ github.run_id }}) | .id" 2>/dev/null)
+          # 按「工作流文件」定位，不按显示名。
+          # 早期运行的 name 会退化成文件路径，按名字过滤会漏删。
+          WF_FILE=$(printf '%s' "${{ github.workflow_ref }}" | sed 's|^.*/\.github/workflows/||; s|@.*$||')
+          if [ -z "$WF_FILE" ]; then
+            WF_FILE="${{ github.event.workflow_run.path }}"
+          fi
+          # 列表走 workflows/{file}/runs，删除必须用 actions/runs/{id}
+          RUNS_API="repos/${{ github.repository }}/actions/workflows/${WF_FILE}/runs"
+          DEL_API="repos/${{ github.repository }}/actions/runs"
+          echo "工作流文件: ${WF_FILE}"
+          ALL=$(gh api "${RUNS_API}?per_page=100" \
+                --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id" 2>/dev/null)
           if [ -z "$ALL" ]; then
             echo "无需清理（没有历史运行）"
             exit 0
@@ -276,7 +284,7 @@ jobs:
           fi
           ok=0; fail=0
           for id in $DROP; do
-            if gh api -X DELETE "${API}/${id}" >/dev/null 2>&1; then
+            if gh api -X DELETE "${DEL_API}/${id}" >/dev/null 2>&1; then
               ok=$((ok + 1))
             else
               fail=$((fail + 1))
