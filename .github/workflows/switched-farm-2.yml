@@ -59,6 +59,7 @@ concurrency:
 
 permissions:
   contents: write   # 需要提交 switched/<N>/time.txt
+  actions: write    # 需要删除旧的 workflow run（清理旧运行）
 
 env:
   # ── 账号标识：每个 yml 填不同数字 ──
@@ -255,15 +256,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 删除 workflow run 需要 permissions.actions: write
+          set +e
           KEEP=5
-          # 只清理本工作流的旧运行，且绝不删当前这一次
-          RUNS=$(gh api "repos/${{ github.repository }}/actions/runs?per_page=100" \
-                 --jq ".workflow_runs[] | select(.name==\"${{ github.workflow }}\" and .id != ${{ github.run_id }}) | .id" \
-                 | tail -n +$((KEEP+1)))
-          if [ -z "$RUNS" ]; then echo "无需清理"; exit 0; fi
-          for id in $RUNS; do
-            gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$id" && echo "已删除 run $id"
+          API="repos/${{ github.repository }}/actions/runs"
+          # 只挑本工作流的运行，且绝不删当前这一次
+          ALL=$(gh api "${API}?per_page=100" \
+                --jq ".workflow_runs[] | select(.name==\"${{ github.workflow }}\" and .id != ${{ github.run_id }}) | .id" 2>/dev/null)
+          if [ -z "$ALL" ]; then
+            echo "无需清理（没有历史运行）"
+            exit 0
+          fi
+          TOTAL=$(printf '%s\n' "$ALL" | grep -c .)
+          echo "本工作流历史运行 $TOTAL 条，保留最新 $KEEP 条"
+          DROP=$(printf '%s\n' "$ALL" | tail -n +$((KEEP + 1)))
+          if [ -z "$DROP" ]; then
+            echo "无需清理（未超过 $KEEP 条）"
+            exit 0
+          fi
+          ok=0; fail=0
+          for id in $DROP; do
+            if gh api -X DELETE "${API}/${id}" >/dev/null 2>&1; then
+              ok=$((ok + 1))
+            else
+              fail=$((fail + 1))
+            fi
           done
+          echo "已删除 $ok 条，失败 $fail 条"
+          if [ "$fail" -gt 0 ]; then
+            echo "::warning::${fail} 条运行删除失败，通常是缺少 actions: write 权限"
+          fi
+          exit 0
 
       # ── 7) 退出码判定（满额也走 exit 0，不算失败）──
       - name: 按脚本退出码判定结果
